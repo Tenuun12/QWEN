@@ -1,0 +1,12 @@
+{
+  "image": "C:\\QWEN-2B_train\\qwen_dataset\\pdfs_for_compare\\image.png",
+  "base_model": "Qwen/Qwen2-VL-2B-Instruct",
+  "adapter_model": "local_finetuned_model",
+  "max_new_tokens": 1600,
+  "base_chars": 17,
+  "finetuned_chars": 2075,
+  "reference_chars": null,
+  "base_similarity": null,
+  "finetuned_similarity": null,
+  "winner": null
+}

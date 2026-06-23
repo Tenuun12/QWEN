@@ -1,0 +1,1 @@
+(Page 28 is blank in the provided text layer)

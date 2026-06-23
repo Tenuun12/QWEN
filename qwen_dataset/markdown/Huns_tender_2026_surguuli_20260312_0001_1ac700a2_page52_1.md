@@ -1,0 +1,1 @@
+ISO 7560:2003</td> </tr> <tr> <td>11</td> <td>Улаан лууль</td> <td>кг</td> <td>MNS 0264:2009</td> </tr> <tr> <td>12</td> <td>Амтат чинжүү</td> <td>кг</td> <td>MNS 0279:1982</td> </tr> <tr> <td>13</td> <td>Салат навч, 500гр-тай багц</td> <td>шир</td> <td>MNS 0277:1984</td> </tr> </tbody> </table>
