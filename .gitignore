@@ -19,6 +19,7 @@ tmp/
 *.pth
 *.bin
 *.safetensors
+!unsloth_Qwen3-VL-8B-Instruct-unsloth-bnb-4bit_1782271171/adapter_model.safetensors
 *.ckpt
 *.pyc
 *.pyo
