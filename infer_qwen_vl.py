@@ -5,8 +5,7 @@ from urllib.request import urlopen
 
 import torch
 from PIL import Image
-from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
-
+from transformers import AutoProcessor, AutoModelForImageTextToText
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Qwen2-VL inference on an image or a video.")
@@ -53,10 +52,10 @@ def load_model_and_processor(model_name: str):
         print("WARNING: accelerate is not installed. Loading model on a single device instead.")
 
     try:
-        model = Qwen2VLForConditionalGeneration.from_pretrained(
+        model = AutoModelForImageTextToText.from_pretrained(
             model_name,
-            device_map=device_map,
-            torch_dtype=dtype,
+            device_map="auto",
+            torch_dtype=torch.float16,
             trust_remote_code=True,
         )
         print("Model loaded successfully.")
@@ -83,7 +82,10 @@ def run_inference(model, processor, conversation):
         return_tensors="pt",
     ).to(model.device)
 
-    output_ids = model.generate(**inputs, max_new_tokens=128)
+    output_ids = model.generate(
+        **inputs,
+        max_new_tokens=4096,
+    )
     generated_ids = [
         output_ids[i, inputs.input_ids[i].shape[-1] :]
         for i in range(output_ids.shape[0])
