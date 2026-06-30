@@ -7,6 +7,7 @@ import torch
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForImageTextToText
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Qwen2-VL inference on an image or a video.")
     parser.add_argument(
@@ -34,6 +35,26 @@ def parse_args():
         default="Convert the following document to markdown. Return only the markdown with no explanation text. Do not include delimiters like ```markdown or ```html. RULES: - You must include all information on the page. Do not exclude headers, footers, or subtext. - Return tables in an HTML format. - Charts & infographics must be interpreted to a markdown format. Prefer table format when applicable. - Prefer using ☐ and ☑ for check boxes.",
         help="Text prompt to accompany the image or video.",
     )
+    parser.add_argument(
+        "--dtype",
+        default="bfloat16",
+        choices=["bfloat16", "float16", "float32"],
+        help="Torch dtype to load the model in. bfloat16 is recommended, "
+        "especially when some layers get offloaded to CPU (fp16 on CPU "
+        "can produce NaN/Inf and crash generate()).",
+    )
+    parser.add_argument(
+        "--load-in-4bit",
+        action="store_true",
+        help="Load the model with 4-bit (bitsandbytes) quantization. "
+        "Strongly recommended for large models (e.g. 27B) to avoid CPU offload entirely.",
+    )
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=4096,
+        help="Maximum number of new tokens to generate.",
+    )
     return parser.parse_args()
 
 
@@ -42,22 +63,50 @@ def load_image_from_url(url: str) -> Image.Image:
         return Image.open(BytesIO(response.read())).convert("RGB")
 
 
-def load_model_and_processor(model_name: str):
-    print(f"Loading model: {model_name}")
-    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-    accelerate_installed = importlib.util.find_spec("accelerate") is not None
-    device_map = "auto" if accelerate_installed else None
+def resolve_dtype(name: str) -> torch.dtype:
+    return {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }[name]
 
+
+def load_model_and_processor(model_name: str, dtype: torch.dtype, load_in_4bit: bool):
+    print(f"Loading model: {model_name} (dtype={dtype}, 4bit={load_in_4bit})")
+
+    accelerate_installed = importlib.util.find_spec("accelerate") is not None
     if not accelerate_installed:
         print("WARNING: accelerate is not installed. Loading model on a single device instead.")
 
+    device_map = "auto" if accelerate_installed else None
+
+    quantization_config = None
+    if load_in_4bit:
+        bnb_spec = importlib.util.find_spec("bitsandbytes")
+        if bnb_spec is None:
+            raise RuntimeError(
+                "--load-in-4bit was requested but bitsandbytes is not installed. "
+                "Install it with: pip install bitsandbytes"
+            )
+        from transformers import BitsAndBytesConfig
+
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=dtype,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+        )
+
     try:
-        model = AutoModelForImageTextToText.from_pretrained(
-            model_name,
-            device_map="auto",
-            torch_dtype=torch.float16,
+        kwargs = dict(
+            device_map=device_map,
+            torch_dtype=dtype,
             trust_remote_code=True,
         )
+        if quantization_config is not None:
+            kwargs["quantization_config"] = quantization_config
+
+        model = AutoModelForImageTextToText.from_pretrained(model_name, **kwargs)
         print("Model loaded successfully.")
     except Exception as e:
         print(f"Error loading model: {e}")
@@ -73,7 +122,7 @@ def load_model_and_processor(model_name: str):
     return model, processor
 
 
-def run_inference(model, processor, conversation):
+def run_inference(model, processor, conversation, max_new_tokens: int):
     inputs = processor.apply_chat_template(
         conversation,
         add_generation_prompt=True,
@@ -84,7 +133,7 @@ def run_inference(model, processor, conversation):
 
     output_ids = model.generate(
         **inputs,
-        max_new_tokens=4096,
+        max_new_tokens=max_new_tokens,
     )
     generated_ids = [
         output_ids[i, inputs.input_ids[i].shape[-1] :]
@@ -101,8 +150,10 @@ def run_inference(model, processor, conversation):
 
 def main():
     args = parse_args()
+    dtype = resolve_dtype(args.dtype)
+
     print("Loading model and processor...")
-    model, processor = load_model_and_processor(args.model)
+    model, processor = load_model_and_processor(args.model, dtype, args.load_in_4bit)
     print("Model loaded.")
 
     if args.video_path:
@@ -135,9 +186,10 @@ def main():
         ]
 
     print("Running inference...")
-    result = run_inference(model, processor, conversation)
+    result = run_inference(model, processor, conversation, args.max_new_tokens)
     print("Output:")
-    print(result)
+    print(result[0] if isinstance(result, list) and len(result) == 1 else result)
+
 
 if __name__ == "__main__":
     main()
