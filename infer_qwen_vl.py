@@ -1,5 +1,7 @@
 import argparse
 import importlib.util
+import json
+import os
 from io import BytesIO
 from urllib.request import urlopen
 
@@ -71,50 +73,94 @@ def resolve_dtype(name: str) -> torch.dtype:
     }[name]
 
 
-def load_model_and_processor(model_name: str, dtype: torch.dtype, load_in_4bit: bool):
-    print(f"Loading model: {model_name} (dtype={dtype}, 4bit={load_in_4bit})")
+def detect_lora_adapter(model_path: str):
+    """Return base_model_name_or_path if model_path is a LoRA adapter dir, else None."""
+    cfg_path = os.path.join(model_path, "adapter_config.json")
+    if os.path.isdir(model_path) and os.path.isfile(cfg_path):
+        with open(cfg_path, "r") as f:
+            cfg = json.load(f)
+        return cfg.get("base_model_name_or_path")
+    return None
 
+
+def build_quantization_config(dtype: torch.dtype):
+    bnb_spec = importlib.util.find_spec("bitsandbytes")
+    if bnb_spec is None:
+        raise RuntimeError(
+            "--load-in-4bit was requested but bitsandbytes is not installed. "
+            "Install it with: pip install bitsandbytes"
+        )
+    from transformers import BitsAndBytesConfig
+
+    return BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=dtype,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+    )
+
+
+def load_model_and_processor(model_name: str, dtype: torch.dtype, load_in_4bit: bool):
     accelerate_installed = importlib.util.find_spec("accelerate") is not None
     if not accelerate_installed:
         print("WARNING: accelerate is not installed. Loading model on a single device instead.")
-
     device_map = "auto" if accelerate_installed else None
 
-    quantization_config = None
-    if load_in_4bit:
-        bnb_spec = importlib.util.find_spec("bitsandbytes")
-        if bnb_spec is None:
-            raise RuntimeError(
-                "--load-in-4bit was requested but bitsandbytes is not installed. "
-                "Install it with: pip install bitsandbytes"
-            )
-        from transformers import BitsAndBytesConfig
+    quantization_config = build_quantization_config(dtype) if load_in_4bit else None
 
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=dtype,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-        )
+    base_model_name = detect_lora_adapter(model_name)
+    processor_source = model_name
+
+    if base_model_name:
+        # model_name is a LoRA adapter directory. Load the base model ourselves
+        # and attach the adapter via peft directly, instead of relying on
+        # transformers' built-in adapter auto-loading (which can break across
+        # peft/transformers version mismatches).
+        print(f"Detected LoRA adapter. Base model: {base_model_name}")
+        print(f"Loading base model: {base_model_name} (dtype={dtype}, 4bit={load_in_4bit})")
+        try:
+            kwargs = dict(device_map=device_map, dtype=dtype, trust_remote_code=True)
+            if quantization_config is not None:
+                kwargs["quantization_config"] = quantization_config
+            model = AutoModelForImageTextToText.from_pretrained(base_model_name, **kwargs)
+            print("Base model loaded successfully.")
+        except Exception as e:
+            print(f"Error loading base model: {e}")
+            raise
+
+        print(f"Loading LoRA adapter from: {model_name}")
+        try:
+            from peft import PeftModel
+
+            model = PeftModel.from_pretrained(model, model_name)
+            print("Adapter loaded successfully.")
+        except Exception as e:
+            print(f"Error loading adapter: {e}")
+            raise
+
+        # Use the adapter dir's processor if it has one, else fall back to base model's
+        if any(
+            os.path.isfile(os.path.join(model_name, f))
+            for f in ("preprocessor_config.json", "chat_template.json", "tokenizer_config.json")
+        ):
+            processor_source = model_name
+        else:
+            processor_source = base_model_name
+    else:
+        print(f"Loading model: {model_name} (dtype={dtype}, 4bit={load_in_4bit})")
+        try:
+            kwargs = dict(device_map=device_map, dtype=dtype, trust_remote_code=True)
+            if quantization_config is not None:
+                kwargs["quantization_config"] = quantization_config
+            model = AutoModelForImageTextToText.from_pretrained(model_name, **kwargs)
+            print("Model loaded successfully.")
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            raise
 
     try:
-        kwargs = dict(
-            device_map=device_map,
-            torch_dtype=dtype,
-            trust_remote_code=True,
-        )
-        if quantization_config is not None:
-            kwargs["quantization_config"] = quantization_config
-
-        model = AutoModelForImageTextToText.from_pretrained(model_name, **kwargs)
-        print("Model loaded successfully.")
-    except Exception as e:
-        print(f"Error loading model: {e}")
-        raise
-
-    try:
-        processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-        print("Processor loaded successfully.")
+        processor = AutoProcessor.from_pretrained(processor_source, trust_remote_code=True)
+        print(f"Processor loaded successfully (from {processor_source}).")
     except Exception as e:
         print(f"Error loading processor: {e}")
         raise
